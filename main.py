@@ -277,4 +277,4 @@ async def get_job(job_id: str):
 
 @app.get("/")
 async def root():
-    return {"ok": True}
+    return {"ok": True, "message": "Ad Storyboard Backend running. Try /health"}
