@@ -275,6 +275,6 @@ async def get_job(job_id: str):
         return JSONResponse({"status": "not_found"}, status_code=404)
     return job
 
-@app.get("/")
-async def root():
-    return {"ok": True, "message": "Ad Storyboard Backend running. Try /health"}
+@app.get("/health")
+async def health():
+    return {"ok": True}
