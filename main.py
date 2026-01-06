@@ -5,6 +5,8 @@ import subprocess
 import uuid
 from threading import Thread
 from typing import Dict, List
+from fastapi import Request
+from starlette.datastructures import UploadFile as StarletteUploadFile
 
 import numpy as np
 from fastapi import FastAPI, UploadFile, File
@@ -239,17 +241,38 @@ async def health():
 
 
 @app.post("/process")
-async def process_video(file: UploadFile = File(...)):
+async def process_video(request: Request):
     job_id = uuid.uuid4().hex
     job_dir = os.path.join(WORKDIR, job_id)
     os.makedirs(job_dir, exist_ok=True)
 
-    video_path = os.path.join(job_dir, file.filename)
+    form = await request.form()
+
+    upload = None
+    for key in ["file", "video", "media", "upload"]:
+        if key in form:
+            upload = form[key]
+            break
+
+    # If the client used a random field name, try first file-like entry
+    if upload is None:
+        for v in form.values():
+            upload = v
+            break
+
+    if upload is None or not isinstance(upload, StarletteUploadFile):
+        return JSONResponse(
+            {"error": "No uploaded file found. Expected multipart form with a file field."},
+            status_code=422,
+        )
+
+    filename = upload.filename or "upload.mp4"
+    video_path = os.path.join(job_dir, filename)
+
     with open(video_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
+        shutil.copyfileobj(upload.file, f)
 
     JOBS[job_id] = {"status": "processing"}
-
     Thread(target=background_process, args=(job_id, video_path), daemon=True).start()
 
     return {"job_id": job_id}
