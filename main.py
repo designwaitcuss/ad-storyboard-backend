@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import uuid
+import re
 from threading import Thread
 from typing import Dict, List
 from fastapi import Request
@@ -64,58 +65,80 @@ def probe_duration(video_path: str) -> float:
 def extract_scene_frames(video_path: str, out_dir: str, max_frames: int = 20) -> List[dict]:
     os.makedirs(out_dir, exist_ok=True)
 
-    # Higher threshold -> fewer frames
-    threshold = "0.35"
-    pattern = os.path.join(out_dir, "frame_%06d.jpg")
-
-    vf = f"select='gt(scene,{threshold})',scale=640:-1"
-
-    # Extract frames on scene changes
-    run([
-        "ffmpeg",
-        "-y",
-        "-i",
-        video_path,
-        "-vf",
-        vf,
-        "-vsync",
-        "vfr",
-        "-q:v",
-        "3",
-        pattern,
-    ])
-
-    frames = sorted([f for f in os.listdir(out_dir) if f.startswith("frame_") and f.endswith(".jpg")])
-
-    # Fallback if scene detection returns nothing
-    if not frames:
+    def extract_at_time(t: float, out_path: str) -> None:
         run([
-            "ffmpeg",
-            "-y",
-            "-i",
-            video_path,
-            "-vf",
-            "scale=640:-1",
-            "-frames:v",
-            "1",
-            os.path.join(out_dir, "frame_000001.jpg"),
+            "ffmpeg", "-y",
+            "-ss", f"{t}",
+            "-i", video_path,
+            "-vframes", "1",
+            "-q:v", "3",
+            "-vf", "scale=640:-1",
+            out_path
         ])
-        frames = ["frame_000001.jpg"]
 
-    # Cap frames by sampling evenly
-    if len(frames) > max_frames:
-        idxs = np.linspace(0, len(frames) - 1, max_frames).astype(int).tolist()
-        frames = [frames[i] for i in idxs]
+    def extract_scene_frames_with_timestamps(threshold: float) -> List[dict]:
+        pattern = os.path.join(out_dir, "scene_%06d.jpg")
 
-    duration = probe_duration(video_path)
-    n = len(frames)
+        vf = f"select='gt(scene,{threshold})',showinfo,scale=640:-1"
 
-    results = []
-    for i, fname in enumerate(frames):
-        t = 0.0 if n == 1 else (duration * i / (n - 1))
-        results.append({"path": os.path.join(out_dir, fname), "timestamp": float(t)})
+        p = subprocess.run(
+            ["ffmpeg", "-y", "-i", video_path, "-vf", vf, "-vsync", "vfr", "-q:v", "3", pattern],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if p.returncode != 0:
+            err = p.stderr.decode("utf-8", errors="ignore")
+            out = p.stdout.decode("utf-8", errors="ignore")
+            raise RuntimeError(f"Scene extraction failed\n{err}\n{out}")
 
-    return results
+        # Parse pts_time from showinfo for each output frame
+        stderr = p.stderr.decode("utf-8", errors="ignore")
+        pts_times = [float(x) for x in re.findall(r"pts_time:([0-9]+\.[0-9]+)", stderr)]
+
+        files = sorted([f for f in os.listdir(out_dir) if f.startswith("scene_") and f.endswith(".jpg")])
+        results = []
+        for i, fname in enumerate(files):
+            ts = pts_times[i] if i < len(pts_times) else 0.0
+            results.append({"path": os.path.join(out_dir, fname), "timestamp": float(ts)})
+        return results
+
+    # 1) Always include early frames (fixes your issue)
+    early = []
+    first_path = os.path.join(out_dir, "early_000000.jpg")
+    second_path = os.path.join(out_dir, "early_000001.jpg")
+
+    extract_at_time(0.0, first_path)
+    early.append({"path": first_path, "timestamp": 0.0})
+
+    # 1.0s catches most talking head intros without being too redundant
+    extract_at_time(1.0, second_path)
+    early.append({"path": second_path, "timestamp": 1.0})
+
+    # 2) Scene detection frames with real timestamps
+    scene = extract_scene_frames_with_timestamps(threshold=0.35)
+
+    # 3) Merge and de-duplicate by timestamp proximity
+    merged = early + scene
+    merged.sort(key=lambda x: x["timestamp"])
+
+    deduped = []
+    min_gap = 0.6  # seconds. prevents near-identical frames
+    for item in merged:
+        if not deduped:
+            deduped.append(item)
+            continue
+        if abs(item["timestamp"] - deduped[-1]["timestamp"]) >= min_gap:
+            deduped.append(item)
+
+    # 4) Cap frames by sampling evenly, while keeping the first frame
+    if len(deduped) > max_frames:
+        keep_first = deduped[0]
+        rest = deduped[1:]
+        target_rest = max_frames - 1
+        idxs = np.linspace(0, len(rest) - 1, target_rest).astype(int).tolist()
+        deduped = [keep_first] + [rest[i] for i in idxs]
+
+    return deduped
 
 
 def ocr_image(image_path: str) -> str:
