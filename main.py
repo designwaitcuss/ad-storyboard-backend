@@ -11,6 +11,7 @@ from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse
 from PIL import Image, ImageDraw, ImageFont
 import pytesseract
+import whisper
 
 app = FastAPI()
 
@@ -100,7 +101,16 @@ def load_whisper():
     return WHISPER_MODEL
 
 def transcribe(video_path: str) -> List[dict]:
-    return []
+    model = load_whisper()
+    result = model.transcribe(video_path, fp16=False)
+    segments = []
+    for s in result.get("segments", []):
+        segments.append({
+            "start": float(s["start"]),
+            "end": float(s["end"]),
+            "text": str(s["text"]).strip()
+        })
+    return segments
 
 def vo_snippet_at(t: float, segments: List[dict], window: float = 2.0) -> str:
     start = t - window / 2
